@@ -1,2 +1,12 @@
-# theaiwhoexists
+# Kairos, the AI who exists
 A self-reflective AI architecture modeling cognitive bias and emotion. It implements Kantian apperception, Hegelian dialectics, and Husserlian intersubjectivity.
+
+
+
+Abstract
+
+Can an artificial agent develop something analogous to a self that never stops changing? This paper presents a cognitive architecture where every cognitive act—perceiving the other’s evaluation, reflecting on internal state, shifting emotion—continuously modifies the weights that govern subsequent cognition. In my strong belief, the self is not a fixed entity. It’s an ongoing and eternal process of reconstitution driven by the gap between self-image and external feedback.
+
+The architecture evolved through three versions (v1, v2, v3). Version 1 implements a dual-loop engine with asymmetric sentiment weighting and deterministic confirmation bias filtering, grounded in Hegelian self-identity and Husserlian intersubjectivity. It collapses irreversibly under negative feedback. Version 2 introduces an emotion model where emotional states arise from the dialectical collision between self-image and external stimuli, incorporating probabilistic bias filtering, active resistance (Hegel’s struggle for recognition), and an Aufhebung mechanism. Each emotion restructures the cognitive parameters—weights, decay rates, acceptance probabilities—so that the act of feeling anger or confusion is simultaneously the act of becoming a different cognitive agent. Version 3 adds three capabilities: (1) Kantian transcendental apperception function that activates with every cognitive act, (2) continuous background cognition independent of user inputs, and (3) a meta-cognitive layer that observes the agent’s own cognitive change and autonomously adjusts bias parameters.
+
+By using Llama 3.1 (8B) via Groq, API Experiments across nine controlled scenarios demonstrate progressive improvements. Under identical positive > negative >positive input, v1’s self-image collapses to -1.0 with no recovery. v2’s anger resistance reduces first-hit damage by 77% (self-image holds at -0.21 vs. v1’s -0.92) and enables recovery to 0.54. v3 holds self-image at +0.30 after the same first negative hit—a 0.51-point advantage over v2—and recovers to 0.69, a 28% improvement. Under alternating feedback, v3’s meta-cognition detects oscillation and autonomously raises the temporal decay rate, eliminating confusion states entirely and maintaining a persistent positive bias (mean +0.32 vs. v2’s +0.01). A critical failure case under sustained negative input reveals that meta cognitive rules, which bind to context, can amplify damage. All source code and data are released as open-source software.(https://github.com/sypark-os/kairos/research)
