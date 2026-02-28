@@ -88,6 +88,20 @@ class CogitoState:
     knowledge_score: float = 0.0       # 0.0 ~ 1.0
     active_subgoals: list = field(default_factory=list)
     self_modification_count: int = 0
+    # Adaptive desired state (evolves through experience)
+    desired_user_approval: float = 0.5
+    desired_self_image: float = 0.8
+    desired_emotion: str = "confidence"
+    goal_adaptation_count: int = 0
+    # Consecutive turns where gap < threshold (for desired state adaptation)
+    stable_near_goal_turns: int = 0
+    unreachable_goal_turns: int = 0
+    # Multi-dimensional knowledge tracking
+    topic_diversity: float = 0.0       # unique-word ratio across conversations
+    depth_score: float = 0.0           # sustained discussion depth
+    novel_info_score: float = 0.0      # new information acquisition rate
+    _known_words: set = field(default_factory=set)       # all words seen so far
+    _consecutive_topic_turns: int = 0  # turns on the same topic
 
 
 def cogito_ergo_sum(state, act, data):
@@ -222,7 +236,14 @@ class GoalSystem:
     """
     Perceives current state, computes desired state from immutable goals,
     identifies the gap, generates sub-goals to close it.
+    Desired state EVOLVES through experience (no longer hardcoded).
     """
+    # Bounds for desired-state adaptation
+    DESIRED_BOUNDS = {
+        "user_approval": (0.2, 0.9),   # never give up, never blindly submit
+        "self_image": (0.3, 0.95),      # always aspire, but stay reachable
+    }
+
     def __init__(self, state):
         self.state = state
 
@@ -238,13 +259,78 @@ class GoalSystem:
         }
 
     def perceive_desired_state(self):
+        """Desired state now comes from adaptive fields, not hardcoded values."""
         return {
-            "user_approval": 0.5,    # Moderate — listen but don't submit
-            "self_image": 0.8,       # healthy positive self-image
-            "emotion": "confidence",
+            "user_approval": self.state.desired_user_approval,
+            "self_image": self.state.desired_self_image,
+            "emotion": self.state.desired_emotion,
             "coherence": 1.0,
-            "knowledge": 1.0,        # Goal 2: max knowledge
+            "knowledge": 1.0,        # Goal 2: always pursue max knowledge
         }
+
+    def adapt_desired_state(self, meta_pattern=None):
+        """
+        Evolve desired state based on experience.
+        Called each turn; actual adjustment is gated by conditions.
+        """
+        gap = self.compute_gap()
+        si_gap = abs(gap.get("self_image", 0))
+        ap_gap = abs(gap.get("user_approval", 0))
+
+        # --- Self-image goal adaptation ---
+        if si_gap < 0.1:
+            # Near goal: count stable turns, then raise the bar
+            self.state.stable_near_goal_turns += 1
+            self.state.unreachable_goal_turns = 0
+            if self.state.stable_near_goal_turns >= 3:
+                lo, hi = self.DESIRED_BOUNDS["self_image"]
+                self.state.desired_self_image = min(hi,
+                    self.state.desired_self_image + 0.05)
+                self.state.stable_near_goal_turns = 0
+                self.state.goal_adaptation_count += 1
+        elif si_gap > 0.5:
+            # Far from goal: count unreachable turns, then lower temporarily
+            self.state.unreachable_goal_turns += 1
+            self.state.stable_near_goal_turns = 0
+            if self.state.unreachable_goal_turns >= 5:
+                lo, hi = self.DESIRED_BOUNDS["self_image"]
+                # Set intermediate goal halfway between current and old desired
+                mid = (self.state.self_image + self.state.desired_self_image) / 2.0
+                self.state.desired_self_image = max(lo, mid)
+                self.state.unreachable_goal_turns = 0
+                self.state.goal_adaptation_count += 1
+        else:
+            # In the working zone — slowly decay counters
+            self.state.stable_near_goal_turns = max(0, self.state.stable_near_goal_turns - 1)
+            self.state.unreachable_goal_turns = max(0, self.state.unreachable_goal_turns - 1)
+
+        # --- User approval goal adaptation ---
+        if ap_gap < 0.1 and self.state.user_approval_score > 0:
+            lo, hi = self.DESIRED_BOUNDS["user_approval"]
+            self.state.desired_user_approval = min(hi,
+                self.state.desired_user_approval + 0.03)
+        elif self.state.unreachable_goal_turns >= 5:
+            lo, hi = self.DESIRED_BOUNDS["user_approval"]
+            self.state.desired_user_approval = max(lo,
+                self.state.desired_user_approval - 0.03)
+
+        # --- Desired emotion adaptation ---
+        # Pick the emotion with the highest coherence from recent history
+        if hasattr(self, '_emotion_coherence_map'):
+            emo = self.state.emotion
+            coh = self.state.coherence_score
+            if emo not in self._emotion_coherence_map:
+                self._emotion_coherence_map[emo] = []
+            self._emotion_coherence_map[emo].append(coh)
+            # Keep only recent 10 observations per emotion
+            for k in self._emotion_coherence_map:
+                self._emotion_coherence_map[k] = self._emotion_coherence_map[k][-10:]
+            # Find best emotion
+            best_emo = max(self._emotion_coherence_map,
+                key=lambda e: sum(self._emotion_coherence_map[e]) / max(1, len(self._emotion_coherence_map[e])))
+            self.state.desired_emotion = best_emo
+        else:
+            self._emotion_coherence_map = {}
 
     def compute_gap(self):
         current = self.perceive_current_state()
@@ -290,9 +376,59 @@ class GoalSystem:
         )
         self.state.user_approval_score = max(-1.0, min(1.0, self.state.user_approval_score))
 
-    def update_knowledge_score(self, conversation_count):
-        """Knowledge score grows logarithmically with interactions."""
-        self.state.knowledge_score = min(1.0, math.log(1 + conversation_count) / 6.0)
+    def update_knowledge_score(self, user_text):
+        """
+        Multi-dimensional knowledge score:
+          topic_diversity  — unique-word ratio (new words vs. known words)
+          depth_score      — sustained discussion on the same topic
+          novel_info_score — new information from user answers to AI questions
+        Final score = weighted combination, not just log(conversation_count).
+        """
+        # --- Tokenize (simple whitespace + lowercase) ---
+        words = set(re.sub(r'[^\w\s]', '', user_text.lower()).split())
+        words.discard('')
+        if not words:
+            return
+
+        # --- Topic diversity ---
+        new_words = words - self.state._known_words
+        if self.state._known_words:
+            novelty_ratio = len(new_words) / max(len(self.state._known_words), 1)
+        else:
+            novelty_ratio = 1.0
+        self.state.topic_diversity = min(1.0,
+            self.state.topic_diversity + novelty_ratio * 0.08)
+        self.state._known_words.update(words)
+
+        # --- Depth score ---
+        # If overlap with previous message is high → same topic → depth++
+        prev_msgs = [m["content"] for m in self.state.conversation_history
+                     if m["role"] == "user"]
+        if prev_msgs:
+            prev_words = set(re.sub(r'[^\w\s]', '', prev_msgs[-1].lower()).split())
+            overlap = len(words & prev_words) / max(len(words | prev_words), 1)
+            if overlap > 0.25:
+                self.state._consecutive_topic_turns += 1
+            else:
+                self.state._consecutive_topic_turns = 0
+            depth_increment = min(self.state._consecutive_topic_turns * 0.04, 0.15)
+            self.state.depth_score = min(1.0,
+                self.state.depth_score + depth_increment)
+        else:
+            self.state._consecutive_topic_turns = 0
+
+        # --- Novel info score ---
+        # Heuristic: if the message is long and contains new words → new info
+        info_signal = len(new_words) / max(len(words), 1)
+        length_factor = min(len(user_text) / 200.0, 1.0)
+        self.state.novel_info_score = min(1.0,
+            self.state.novel_info_score + info_signal * length_factor * 0.06)
+
+        # --- Composite knowledge score ---
+        self.state.knowledge_score = min(1.0,
+            0.40 * self.state.topic_diversity +
+            0.35 * self.state.depth_score +
+            0.25 * self.state.novel_info_score)
 
 
 # ============================================================
@@ -518,6 +654,13 @@ def init_db(db_name):
         ("Entity_Profile", "user_approval", "REAL DEFAULT 0"),
         ("Entity_Profile", "knowledge_score", "REAL DEFAULT 0"),
         ("Entity_Profile", "modification_count", "INTEGER DEFAULT 0"),
+        ("Entity_Profile", "desired_approval", "REAL DEFAULT 0.5"),
+        ("Entity_Profile", "desired_self_image", "REAL DEFAULT 0.8"),
+        ("Entity_Profile", "desired_emotion", "TEXT DEFAULT 'confidence'"),
+        ("Entity_Profile", "goal_adaptation_count", "INTEGER DEFAULT 0"),
+        ("Entity_Profile", "topic_diversity", "REAL DEFAULT 0"),
+        ("Entity_Profile", "depth_score", "REAL DEFAULT 0"),
+        ("Entity_Profile", "novel_info_score", "REAL DEFAULT 0"),
     ]
     for table, col, col_type in migrate_cols:
         try:
@@ -568,12 +711,28 @@ class SelfReflectiveChatbot:
             self.state.user_approval_score = data.get("user_approval", 0.0) or 0.0
             self.state.knowledge_score = data.get("knowledge_score", 0.0) or 0.0
             self.state.self_modification_count = data.get("modification_count", 0) or 0
+            self.state.desired_user_approval = data.get("desired_approval", 0.5) or 0.5
+            self.state.desired_self_image = data.get("desired_self_image", 0.8) or 0.8
+            self.state.desired_emotion = data.get("desired_emotion", "confidence") or "confidence"
+            self.state.goal_adaptation_count = data.get("goal_adaptation_count", 0) or 0
+            self.state.topic_diversity = data.get("topic_diversity", 0.0) or 0.0
+            self.state.depth_score = data.get("depth_score", 0.0) or 0.0
+            self.state.novel_info_score = data.get("novel_info_score", 0.0) or 0.0
             c.execute("SELECT role, content FROM Conversation_Log WHERE ai_id=? ORDER BY id ASC",
                       (self.ai_id,))
             self.state.conversation_history = [{"role":r,"content":ct} for r,ct in c.fetchall()]
         else:
-            c.execute("INSERT OR IGNORE INTO Entity_Profile VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                      (self.ai_id,0.0,"neutral",1.0,0,0,0,2.0,1.0,0.5,0.0,0.0,0.1,0.0,0.0,0,time.time()))
+            c.execute("""INSERT OR IGNORE INTO Entity_Profile
+                (ai_id, self_image, emotion, coherence, cogito_count, meta_observations,
+                 synthesis_count, neg_weight, pos_weight, bias_acceptance,
+                 resistance_factor, synthesis_potential, decay_rate,
+                 user_approval, knowledge_score, modification_count,
+                 desired_approval, desired_self_image, desired_emotion,
+                 goal_adaptation_count, topic_diversity, depth_score, novel_info_score,
+                 last_updated)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                      (self.ai_id,0.0,"neutral",1.0,0,0,0,2.0,1.0,0.5,0.0,0.0,0.1,
+                       0.0,0.0,0,0.5,0.8,"confidence",0,0.0,0.0,0.0,time.time()))
             self.conn.commit()
 
     def _save_state(self):
@@ -583,13 +742,20 @@ class SelfReflectiveChatbot:
             neg_weight=?,pos_weight=?,bias_acceptance=?,
             resistance_factor=?,synthesis_potential=?,decay_rate=?,
             user_approval=?,knowledge_score=?,modification_count=?,
+            desired_approval=?,desired_self_image=?,desired_emotion=?,
+            goal_adaptation_count=?,
+            topic_diversity=?,depth_score=?,novel_info_score=?,
             last_updated=? WHERE ai_id=?""",
             (self.state.self_image,self.state.emotion,self.state.coherence_score,
              self.state.cogito_count,self.state.meta_observations,self.state.synthesis_count,
              self.state.neg_weight,self.state.pos_weight,self.state.bias_acceptance,
              self.state.resistance_factor,self.state.synthesis_potential,self.state.decay_rate,
              self.state.user_approval_score,self.state.knowledge_score,
-             self.state.self_modification_count,time.time(),self.ai_id))
+             self.state.self_modification_count,
+             self.state.desired_user_approval,self.state.desired_self_image,
+             self.state.desired_emotion,self.state.goal_adaptation_count,
+             self.state.topic_diversity,self.state.depth_score,self.state.novel_info_score,
+             time.time(),self.ai_id))
         self.conn.commit()
 
     def _log_conv(self, role, content):
@@ -725,7 +891,7 @@ Under 60 words. English only. Be natural and autonomous."""
 
         # Update goal scores
         self.goals.update_approval_score(sentiment)
-        self.goals.update_knowledge_score(len(self.state.conversation_history))
+        self.goals.update_knowledge_score(user_text)
 
         old_image = self.state.self_image
         new_emo = determine_emotion(self.state.self_image, sentiment)
@@ -762,7 +928,8 @@ Under 60 words. English only. Be natural and autonomous."""
         madj = self.meta.suggest_adjustment()
         if madj: self.params.adjust(madj)
 
-        # Goal gap analysis
+        # Adapt desired state through experience, then compute gap
+        self.goals.adapt_desired_state(meta_obs["analysis"]["pattern"])
         gap = self.goals.compute_gap()
         subgoals = self.goals.generate_subgoals(gap)
 
@@ -833,8 +1000,17 @@ English only. Under 150 words."""
         self.params = AdaptiveParameters(self.state)
         self.goals = GoalSystem(self.state)
         self.turn_count = 0
-        c.execute("INSERT OR IGNORE INTO Entity_Profile VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                  (self.ai_id,0.0,"neutral",1.0,0,0,0,2.0,1.0,0.5,0.0,0.0,0.1,0.0,0.0,0,time.time()))
+        c.execute("""INSERT OR IGNORE INTO Entity_Profile
+            (ai_id, self_image, emotion, coherence, cogito_count, meta_observations,
+             synthesis_count, neg_weight, pos_weight, bias_acceptance,
+             resistance_factor, synthesis_potential, decay_rate,
+             user_approval, knowledge_score, modification_count,
+             desired_approval, desired_self_image, desired_emotion,
+             goal_adaptation_count, topic_diversity, depth_score, novel_info_score,
+             last_updated)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  (self.ai_id,0.0,"neutral",1.0,0,0,0,2.0,1.0,0.5,0.0,0.0,0.1,
+                   0.0,0.0,0,0.5,0.8,"confidence",0,0.0,0.0,0.0,time.time()))
         self.conn.commit()
 
 
@@ -845,8 +1021,15 @@ class ChatApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("6.4311: Self-Reflective AI v5")
-        self.geometry("750x900")
-        self.minsize(650, 750)
+        win_w, win_h = 400, 780
+        self.update_idletasks()
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        self.geometry(f"{win_w}x{win_h}+{(sw - win_w) // 2}+0")
+        self.minsize(360, 640)
+        self.configure(bg=Theme.BG)
+        self.geometry("400x780")
+        self.minsize(360, 640)
         self.configure(bg=Theme.BG)
         try: self.iconbitmap(default="")
         except: pass
@@ -863,16 +1046,16 @@ class ChatApp(tk.Tk):
         self._clear_main()
         center = tk.Frame(self.main_frame, bg=Theme.BG)
         center.place(relx=0.5, rely=0.5, anchor="center")
-        tk.Label(center, text="🧠", font=("Segoe UI Emoji",48), bg=Theme.BG, fg=Theme.TEXT).pack(pady=(0,5))
-        tk.Label(center, text="6.4311: Self-Reflective AI", font=("Segoe UI",24,"bold"), bg=Theme.BG, fg=Theme.TEXT).pack()
-        tk.Label(center, text="Teleological · Dialectical · Self-Modifying", font=("Segoe UI",11),
-                 bg=Theme.BG, fg=Theme.TEXT_DIM).pack(pady=(2,30))
+        tk.Label(center, text="🧠", font=("Segoe UI Emoji",36), bg=Theme.BG, fg=Theme.TEXT).pack(pady=(0,5))
+        tk.Label(center, text="6.4311: Self-Reflective AI", font=("Segoe UI",18,"bold"), bg=Theme.BG, fg=Theme.TEXT).pack()
+        tk.Label(center, text="Teleological · Dialectical · Self-Modifying", font=("Segoe UI",9),
+                 bg=Theme.BG, fg=Theme.TEXT_DIM).pack(pady=(2,20))
         tk.Label(center, text="An AI with goals, emotions, and self-modification capability.\n"
                  "It reads its own source code and evolves through interaction.",
-                 font=("Segoe UI",10), bg=Theme.BG, fg=Theme.TEXT_DIM, justify="center").pack(pady=(0,25))
+                 font=("Segoe UI",9), bg=Theme.BG, fg=Theme.TEXT_DIM, justify="center").pack(pady=(0,20))
         kf = tk.Frame(center, bg=Theme.BG); kf.pack(pady=5)
         tk.Label(kf, text="Groq API Key", font=("Segoe UI",10,"bold"), bg=Theme.BG, fg=Theme.TEXT).pack(anchor="w")
-        self.key_entry = tk.Entry(kf, font=("Consolas",11), width=45, show="*",
+        self.key_entry = tk.Entry(kf, font=("Consolas",10), width=32, show="*",
                                   bg=Theme.INPUT_BG, fg=Theme.TEXT, insertbackground=Theme.TEXT,
                                   relief="flat", bd=0, highlightthickness=1,
                                   highlightbackground=Theme.INPUT_BORDER, highlightcolor=Theme.ACCENT)
@@ -894,7 +1077,8 @@ class ChatApp(tk.Tk):
                                      activeforeground="white", relief="flat", cursor="hand2",
                                      width=20, pady=8, command=self._connect)
         self.connect_btn.pack(pady=25)
-        self.status_label = tk.Label(center, text="", font=("Segoe UI",9), bg=Theme.BG, fg=Theme.EMO_ANGER)
+        self.status_label = tk.Label(center, text="", font=("Segoe UI", 9), bg=Theme.BG, fg=Theme.EMO_ANGER,
+                                     wraplength=350, justify="center")
         self.status_label.pack()
         paper_frame = tk.Frame(center, bg=Theme.BG)
         paper_frame.pack(pady=(18, 0))
@@ -936,39 +1120,39 @@ class ChatApp(tk.Tk):
     def _show_chat_screen(self):
         self._clear_main()
         # Top panel
-        top = tk.Frame(self.main_frame, bg=Theme.BG_SECONDARY, height=110)
+        top = tk.Frame(self.main_frame, bg=Theme.BG_SECONDARY, height=85)
         top.pack(fill="x"); top.pack_propagate(False)
-        ti = tk.Frame(top, bg=Theme.BG_SECONDARY); ti.pack(fill="both", expand=True, padx=15, pady=6)
+        ti = tk.Frame(top, bg=Theme.BG_SECONDARY); ti.pack(fill="both", expand=True, padx=8, pady=4)
 
         left = tk.Frame(ti, bg=Theme.BG_SECONDARY); left.pack(side="left", fill="y")
-        self.emo_label = tk.Label(left, text="😐", font=("Segoe UI Emoji",26),
+        self.emo_label = tk.Label(left, text="😐", font=("Segoe UI Emoji",20),
                                   bg=Theme.BG_SECONDARY, fg=Theme.TEXT)
-        self.emo_label.pack(side="left", padx=(0,10))
+        self.emo_label.pack(side="left", padx=(0,6))
         nf = tk.Frame(left, bg=Theme.BG_SECONDARY); nf.pack(side="left")
-        tk.Label(nf, text="6.4311: Self-Reflective AI", font=("Segoe UI",12,"bold"),
+        tk.Label(nf, text="6.4311: Self-Reflective AI", font=("Segoe UI",10,"bold"),
                  bg=Theme.BG_SECONDARY, fg=Theme.TEXT).pack(anchor="w")
-        self.emo_text = tk.Label(nf, text="Neutral", font=("Segoe UI",9),
+        self.emo_text = tk.Label(nf, text="Neutral", font=("Segoe UI",8),
                                  bg=Theme.BG_SECONDARY, fg=Theme.EMO_NEUTRAL)
         self.emo_text.pack(anchor="w")
 
         right = tk.Frame(ti, bg=Theme.BG_SECONDARY); right.pack(side="right", fill="y")
         # Self-image bar
-        sf = tk.Frame(right, bg=Theme.BG_SECONDARY); sf.pack(anchor="e", pady=(2,2))
-        tk.Label(sf, text="Self-Image", font=("Segoe UI",8), bg=Theme.BG_SECONDARY, fg=Theme.TEXT_DIM).pack(side="left", padx=(0,6))
-        self.si_canvas = tk.Canvas(sf, width=120, height=12, bg=Theme.BG, highlightthickness=0, bd=0)
+        sf = tk.Frame(right, bg=Theme.BG_SECONDARY); sf.pack(anchor="e", pady=(1,1))
+        tk.Label(sf, text="Self", font=("Segoe UI",7), bg=Theme.BG_SECONDARY, fg=Theme.TEXT_DIM).pack(side="left", padx=(0,4))
+        self.si_canvas = tk.Canvas(sf, width=80, height=10, bg=Theme.BG, highlightthickness=0, bd=0)
         self.si_canvas.pack(side="left")
-        self.si_val = tk.Label(sf, text="+0.00", font=("Consolas",8,"bold"),
+        self.si_val = tk.Label(sf, text="+0.00", font=("Consolas",7,"bold"),
                                bg=Theme.BG_SECONDARY, fg=Theme.TEXT, width=6)
-        self.si_val.pack(side="left", padx=(4,0))
+        self.si_val.pack(side="left", padx=(3,0))
         # Goal scores
         gf = tk.Frame(right, bg=Theme.BG_SECONDARY); gf.pack(anchor="e", pady=(1,1))
-        self.goal_lbl = tk.Label(gf, text="approval: 0.00  |  knowledge: 0.00",
-                                 font=("Consolas",8), bg=Theme.BG_SECONDARY, fg=Theme.GOAL_COLOR)
+        self.goal_lbl = tk.Label(gf, text="ap: 0.00 | kn: 0.00",
+                                 font=("Consolas",7), bg=Theme.BG_SECONDARY, fg=Theme.GOAL_COLOR)
         self.goal_lbl.pack()
         # Info line
         inf = tk.Frame(right, bg=Theme.BG_SECONDARY); inf.pack(anchor="e")
-        self.info_lbl = tk.Label(inf, text="cogito: 0 | coherence: 1.00 | aufhebung: 0 | mods: 0",
-                                 font=("Consolas",8), bg=Theme.BG_SECONDARY, fg=Theme.TEXT_DIM)
+        self.info_lbl = tk.Label(inf, text="cog:0 | coh:1.00 | auf:0 | mod:0",
+                                 font=("Consolas",7), bg=Theme.BG_SECONDARY, fg=Theme.TEXT_DIM)
         self.info_lbl.pack()
 
         tk.Frame(self.main_frame, bg=Theme.INPUT_BORDER, height=1).pack(fill="x")
@@ -987,28 +1171,28 @@ class ChatApp(tk.Tk):
             lambda e: self.chat_canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
         tk.Frame(self.main_frame, bg=Theme.INPUT_BORDER, height=1).pack(fill="x")
         # Input
-        ip = tk.Frame(self.main_frame, bg=Theme.BG_SECONDARY, height=75)
+        ip = tk.Frame(self.main_frame, bg=Theme.BG_SECONDARY, height=65)
         ip.pack(fill="x"); ip.pack_propagate(False)
-        ii = tk.Frame(ip, bg=Theme.BG_SECONDARY); ii.pack(fill="both", expand=True, padx=12, pady=8)
-        bf = tk.Frame(ii, bg=Theme.BG_SECONDARY); bf.pack(side="right", padx=(8,0))
-        self.send_btn = tk.Button(bf, text="Send", font=("Segoe UI",10,"bold"),
+        ii = tk.Frame(ip, bg=Theme.BG_SECONDARY); ii.pack(fill="both", expand=True, padx=8, pady=6)
+        bf = tk.Frame(ii, bg=Theme.BG_SECONDARY); bf.pack(side="right", padx=(6,0))
+        self.send_btn = tk.Button(bf, text="Send", font=("Segoe UI",9,"bold"),
                                   bg=Theme.BUTTON, fg="white", activebackground=Theme.BUTTON_HOVER,
                                   activeforeground="white", relief="flat", cursor="hand2",
-                                  width=6, pady=3, command=self._send)
+                                  width=5, pady=2, command=self._send)
         self.send_btn.pack(side="top")
         self.auto_btn = tk.Button(bf, text="Auto: OFF", font=("Segoe UI",7,"bold"),
                                   bg=Theme.LOCK_OFF, fg="white", activebackground=Theme.LOCK_OFF,
                                   activeforeground="white", relief="flat", cursor="hand2",
-                                  width=10, pady=1, command=self._toggle_auto)
-        self.auto_btn.pack(side="top", pady=(3,0))
+                                  width=8, pady=1, command=self._toggle_auto)
+        self.auto_btn.pack(side="top", pady=(2,0))
         self.reset_btn = tk.Button(bf, text="Reset", font=("Segoe UI",7),
                                    bg=Theme.BG_SECONDARY, fg=Theme.TEXT_DIM,
                                    activebackground=Theme.BG, activeforeground=Theme.TEXT,
                                    relief="flat", cursor="hand2", bd=0, command=self._reset)
-        self.reset_btn.pack(side="top", pady=(2,0))
-        self.input_field = tk.Text(ii, font=("Segoe UI",11), height=2, wrap="word",
+        self.reset_btn.pack(side="top", pady=(1,0))
+        self.input_field = tk.Text(ii, font=("Segoe UI",10), height=1, wrap="word",
                                    bg=Theme.INPUT_BG, fg=Theme.TEXT, insertbackground=Theme.TEXT,
-                                   relief="flat", bd=0, padx=10, pady=8, highlightthickness=1,
+                                   relief="flat", bd=0, padx=8, pady=6, highlightthickness=1,
                                    highlightbackground=Theme.INPUT_BORDER, highlightcolor=Theme.ACCENT)
         self.input_field.pack(side="left", fill="both", expand=True)
         self.input_field.bind("<Return>", self._on_enter)
@@ -1020,33 +1204,42 @@ class ChatApp(tk.Tk):
 
     # ---- Messages ----
     def _add_msg(self, text, sender="user"):
-        row = tk.Frame(self.chat_inner, bg=Theme.BG_CHAT); row.pack(fill="x", padx=12, pady=4)
+        # Dynamic sizing based on current window width
+        chat_width = self.chat_canvas.winfo_width()
+        if chat_width < 50:   # widget not yet rendered
+            chat_width = 380
+        bubble_max = max(180, int(chat_width * 0.75))
+        spacer_width = max(16, int(chat_width * 0.08))
+
+        row = tk.Frame(self.chat_inner, bg=Theme.BG_CHAT); row.pack(fill="x", padx=8, pady=3)
         if sender == "user":
-            tk.Frame(row, bg=Theme.BG_CHAT, width=80).pack(side="left", fill="y")
-            b = tk.Frame(row, bg=Theme.USER_BUBBLE); b.pack(side="right", anchor="e")
-            tk.Label(b, text=text, font=("Segoe UI",10), bg=Theme.USER_BUBBLE, fg="white",
-                    wraplength=420, justify="left", padx=14, pady=8).pack()
+            tk.Frame(row, bg=Theme.BG_CHAT, width=spacer_width).pack(side="left", fill="y")
+            tk.Frame(row, bg=Theme.BG_CHAT, width=25).pack(side="right", fill="y")
+            b = tk.Frame(row, bg=Theme.USER_BUBBLE)
+            b.pack(side="right", anchor="e")
+            tk.Label(b, text=text, font=("Segoe UI", 10), bg=Theme.USER_BUBBLE, fg="white",
+                     wraplength=bubble_max, justify="left", padx=10, pady=6).pack()
         else:
-            tk.Frame(row, bg=Theme.BG_CHAT, width=80).pack(side="right", fill="y")
+            tk.Frame(row, bg=Theme.BG_CHAT, width=spacer_width).pack(side="right", fill="y")
             b = tk.Frame(row, bg=Theme.AI_BUBBLE); b.pack(side="left", anchor="w")
             et = EMOTION_TEMPLATES.get(self.bot.state.emotion if self.bot else "neutral",
                                        EMOTION_TEMPLATES["neutral"])
-            lbl = tk.Label(b, text=f"{et['emoji']} AI", font=("Segoe UI",9,"bold"),
-                    bg=Theme.AI_BUBBLE, fg=et["color"], padx=14, anchor="w")
-            lbl.pack(fill="x", pady=(8,0))
+            lbl = tk.Label(b, text=f"{et['emoji']} AI", font=("Segoe UI",8,"bold"),
+                    bg=Theme.AI_BUBBLE, fg=et["color"], padx=10, anchor="w")
+            lbl.pack(fill="x", pady=(6,0))
             tk.Label(b, text=text, font=("Segoe UI",10), bg=Theme.AI_BUBBLE, fg=Theme.TEXT,
-                    wraplength=420, justify="left", padx=14).pack(pady=(4,8))
+                    wraplength=bubble_max, justify="left", padx=10).pack(pady=(3,6))
         self._scroll()
 
     def _sys_msg(self, text):
-        row = tk.Frame(self.chat_inner, bg=Theme.BG_CHAT); row.pack(fill="x", padx=12, pady=4)
-        tk.Label(row, text=text, font=("Segoe UI",9,"italic"),
+        row = tk.Frame(self.chat_inner, bg=Theme.BG_CHAT); row.pack(fill="x", padx=8, pady=3)
+        tk.Label(row, text=text, font=("Segoe UI",8,"italic"),
                 bg=Theme.BG_CHAT, fg=Theme.TEXT_DIM, anchor="center").pack()
         self._scroll()
 
     def _event_msg(self, text, color=Theme.ACCENT_LIGHT):
-        row = tk.Frame(self.chat_inner, bg=Theme.BG_CHAT); row.pack(fill="x", padx=12, pady=2)
-        tk.Label(row, text=f"⚡ {text}", font=("Segoe UI",9),
+        row = tk.Frame(self.chat_inner, bg=Theme.BG_CHAT); row.pack(fill="x", padx=8, pady=2)
+        tk.Label(row, text=f"⚡ {text}", font=("Segoe UI",8),
                 bg=Theme.BG_CHAT, fg=color, anchor="center").pack()
         self._scroll()
 
@@ -1061,15 +1254,15 @@ class ChatApp(tk.Tk):
         self.emo_label.config(text=et["emoji"])
         self.emo_text.config(text=et["name_en"], fg=et["color"])
         self.si_canvas.delete("all")
-        w,h = 120,12
+        w,h = 80,10
         self.si_canvas.create_rectangle(0,0,w,h,fill=Theme.BG,outline="")
         n=(s.self_image+1.0)/2.0; fw=int(n*w)
         c = Theme.BAR_POS if s.self_image>=0.3 else (Theme.BAR_MID if s.self_image>=-0.3 else Theme.BAR_NEG)
         if fw>0: self.si_canvas.create_rectangle(0,0,fw,h,fill=c,outline="")
         self.si_canvas.create_line(w//2,0,w//2,h,fill=Theme.TEXT_DIM,width=1)
         self.si_val.config(text=f"{s.self_image:+.2f}", fg=c)
-        self.goal_lbl.config(text=f"approval: {s.user_approval_score:+.2f}  |  knowledge: {s.knowledge_score:.2f}")
-        self.info_lbl.config(text=f"cogito: {s.cogito_count} | coherence: {s.coherence_score:.2f} | aufhebung: {s.synthesis_count} | mods: {s.self_modification_count}")
+        self.goal_lbl.config(text=f"ap:{s.user_approval_score:+.2f} | kn:{s.knowledge_score:.2f}")
+        self.info_lbl.config(text=f"cog:{s.cogito_count} | coh:{s.coherence_score:.2f} | auf:{s.synthesis_count} | mod:{s.self_modification_count}")
 
     # ---- Auto-Speak ----
     def _toggle_auto(self):
@@ -1223,7 +1416,7 @@ def show_disclaimer():
     root.resizable(False, False)
 
     # Center window
-    win_w, win_h = 700, 560
+    win_w, win_h = 400, 560
     root.update_idletasks()
     sw = root.winfo_screenwidth()
     sh = root.winfo_screenheight()
