@@ -1,5 +1,5 @@
 [WARNING AND STRICT LEGAL DISCLAIMER]
-The code '6.4311_self_reflective_ai_WARNING.py' is extremely dangerous. The artificial intelligence model includes a structure that allows it to autonomously write, apply, and directly execute Python code on your system.
+The code '6.4311_self_reflective_ai.py' is extremely dangerous. The artificial intelligence model includes a structure that allows it to autonomously write, apply, and directly execute Python code on your system.
 
 [CRITICAL SECURITY AND FINANCIAL RISKS]
 The 'SelfModificationEngine' class reads its own source code, receives modification proposals via the AI API, and overwrites the actual file. The modified code is applied to the system after syntax verification through the built-in 'compile' function. There is no sandbox environment or security filter to isolate and block the AI even if it proposes fatal OS commands or malicious code.
