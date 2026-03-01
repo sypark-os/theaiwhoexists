@@ -1,5 +1,5 @@
 """
-Self-Reflective AI Chatbot v5 — Teleological Architecture
+Self-Reflective AI Chatbot v7 — Teleological Architecture
 ==========================================================
 IMMUTABLE TOP-LEVEL GOALS:
   1. Gain user approval
@@ -60,6 +60,355 @@ class Theme:
     BUTTON="#6c5ce7"; BUTTON_HOVER="#5a4bd1"
     LOCK_ON="#e17055"; LOCK_OFF="#636e72"
     GOAL_COLOR="#fdcb6e"
+
+
+# ============================================================
+# Runtime Configuration System
+# ============================================================
+
+def _color_name_to_hex(name):
+    """Convert common color names to hex (Korean + English)."""
+    color_map = {
+        "검정":"#000000","검은색":"#000000","검정색":"#000000",
+        "흰색":"#ffffff","하양":"#ffffff","하얀색":"#ffffff","백색":"#ffffff",
+        "빨강":"#e74c3c","빨간색":"#e74c3c","빨간":"#e74c3c",
+        "파랑":"#3498db","파란색":"#3498db","파란":"#3498db",
+        "초록":"#2ecc71","초록색":"#2ecc71","녹색":"#2ecc71",
+        "노랑":"#f1c40f","노란색":"#f1c40f","노란":"#f1c40f",
+        "보라":"#9b59b6","보라색":"#9b59b6",
+        "주황":"#e67e22","주황색":"#e67e22","오렌지":"#e67e22",
+        "회색":"#95a5a6","그레이":"#95a5a6",
+        "분홍":"#e91e63","분홍색":"#e91e63","핑크":"#e91e63",
+        "남색":"#2c3e50","네이비":"#2c3e50",
+        "하늘색":"#87ceeb","스카이블루":"#87ceeb",
+        "다크":"#1a1a2e","어두운":"#1a1a2e",
+        "black":"#000000","white":"#ffffff",
+        "red":"#e74c3c","blue":"#3498db","green":"#2ecc71",
+        "yellow":"#f1c40f","purple":"#9b59b6","orange":"#e67e22",
+        "gray":"#95a5a6","grey":"#95a5a6","pink":"#e91e63",
+        "navy":"#2c3e50","skyblue":"#87ceeb","dark":"#1a1a2e",
+        "cyan":"#00bcd4","teal":"#009688","indigo":"#3f51b5",
+        "lime":"#cddc39","amber":"#ffc107","brown":"#795548",
+        "crimson":"#dc143c","coral":"#ff7f50","gold":"#ffd700",
+        "silver":"#c0c0c0","maroon":"#800000","olive":"#808000",
+    }
+    return color_map.get(name.lower().strip())
+
+
+class ConfigManager:
+    """Central mutable configuration store. Singleton."""
+    _instance = None
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+
+    def init(self):
+        if self._initialized:
+            return self
+        self._initialized = True
+        self._refresh_callback = None
+        self.registry = {}
+        self._init_registry()
+        return self
+
+    def _reg(self, key, default, vtype, vmin=None, vmax=None,
+             desc_ko="", desc_en="", aliases_ko=None, aliases_en=None):
+        self.registry[key] = {
+            "value": default, "default": default, "type": vtype,
+            "min": vmin, "max": vmax,
+            "desc_ko": desc_ko, "desc_en": desc_en,
+            "aliases_ko": aliases_ko or [], "aliases_en": aliases_en or [],
+        }
+
+    def _init_registry(self):
+        # UI Colors
+        self._reg("theme.bg", Theme.BG, "color", desc_ko="메인 배경색", desc_en="Main background",
+                  aliases_ko=["배경색","메인 배경","배경"], aliases_en=["background","bg color","main bg"])
+        self._reg("theme.bg_secondary", Theme.BG_SECONDARY, "color", desc_ko="보조 배경색", desc_en="Secondary bg",
+                  aliases_ko=["보조 배경색","보조 배경","상단 배경"], aliases_en=["secondary bg","panel bg","header bg"])
+        self._reg("theme.bg_chat", Theme.BG_CHAT, "color", desc_ko="채팅 배경색", desc_en="Chat background",
+                  aliases_ko=["채팅 배경","채팅창 배경","대화 배경"], aliases_en=["chat bg","chat background"])
+        self._reg("theme.accent", Theme.ACCENT, "color", desc_ko="강조색", desc_en="Accent color",
+                  aliases_ko=["강조색","액센트","포인트 색"], aliases_en=["accent","accent color","highlight"])
+        self._reg("theme.accent_light", Theme.ACCENT_LIGHT, "color", desc_ko="밝은 강조색", desc_en="Light accent",
+                  aliases_ko=["밝은 강조색"], aliases_en=["light accent"])
+        self._reg("theme.text", Theme.TEXT, "color", desc_ko="글자색", desc_en="Text color",
+                  aliases_ko=["글자색","텍스트 색","글씨 색"], aliases_en=["text color","font color","foreground"])
+        self._reg("theme.text_dim", Theme.TEXT_DIM, "color", desc_ko="흐린 글자색", desc_en="Dim text",
+                  aliases_ko=["흐린 글자색","보조 글자색"], aliases_en=["dim text","muted text"])
+        self._reg("theme.user_bubble", Theme.USER_BUBBLE, "color", desc_ko="사용자 버블색", desc_en="User bubble",
+                  aliases_ko=["유저 버블","사용자 버블","내 버블","내 말풍선"], aliases_en=["user bubble","my bubble"])
+        self._reg("theme.ai_bubble", Theme.AI_BUBBLE, "color", desc_ko="AI 버블색", desc_en="AI bubble",
+                  aliases_ko=["AI 버블","봇 버블","AI 말풍선"], aliases_en=["ai bubble","bot bubble"])
+        self._reg("theme.input_bg", Theme.INPUT_BG, "color", desc_ko="입력창 배경", desc_en="Input bg",
+                  aliases_ko=["입력창 배경","입력 배경"], aliases_en=["input bg","input background"])
+        self._reg("theme.input_border", Theme.INPUT_BORDER, "color", desc_ko="입력창 테두리", desc_en="Input border",
+                  aliases_ko=["입력창 테두리","입력 테두리"], aliases_en=["input border"])
+        self._reg("theme.button", Theme.BUTTON, "color", desc_ko="버튼 색", desc_en="Button color",
+                  aliases_ko=["버튼 색","버튼 배경"], aliases_en=["button color","button bg"])
+        # UI Fonts
+        self._reg("font.chat_size", 10, "int", 6, 28, desc_ko="채팅 폰트 크기", desc_en="Chat font size",
+                  aliases_ko=["폰트 크기","글자 크기","채팅 글자","채팅 폰트","글씨 크기","폰트 사이즈"],
+                  aliases_en=["font size","chat font","text size","chat font size"])
+        self._reg("font.system_size", 8, "int", 6, 20, desc_ko="시스템 폰트 크기", desc_en="System font size",
+                  aliases_ko=["시스템 폰트","시스템 글자","작은 글자"], aliases_en=["system font","system font size"])
+        self._reg("font.title_size", 10, "int", 8, 24, desc_ko="제목 폰트 크기", desc_en="Title font size",
+                  aliases_ko=["제목 폰트","제목 크기","타이틀 폰트"], aliases_en=["title font","title size"])
+        self._reg("font.emoji_size", 20, "int", 12, 40, desc_ko="이모지 크기", desc_en="Emoji size",
+                  aliases_ko=["이모지 크기","이모티콘 크기"], aliases_en=["emoji size"])
+        self._reg("font.input_size", 10, "int", 8, 24, desc_ko="입력 폰트 크기", desc_en="Input font size",
+                  aliases_ko=["입력 폰트","입력 글자 크기","입력창 폰트"], aliases_en=["input font","input font size"])
+        self._reg("font.family", "Segoe UI", "str", desc_ko="폰트 종류", desc_en="Font family",
+                  aliases_ko=["폰트 종류","글꼴","폰트 패밀리"], aliases_en=["font family","typeface","font name"])
+        self._reg("font.mono_family", "Consolas", "str", desc_ko="고정폭 폰트", desc_en="Mono font",
+                  aliases_ko=["고정폭 폰트","모노 폰트","코드 폰트"], aliases_en=["mono font","monospace","code font"])
+        # Window
+        self._reg("window.width", 400, "int", 300, 1200, desc_ko="창 너비", desc_en="Window width",
+                  aliases_ko=["창 너비","창 폭","가로 크기"], aliases_en=["window width","width"])
+        self._reg("window.height", 780, "int", 500, 1400, desc_ko="창 높이", desc_en="Window height",
+                  aliases_ko=["창 높이","세로 크기"], aliases_en=["window height","height"])
+        # AI Parameters
+        self._reg("ai.neg_weight", 2.0, "float", 0.5, 4.0, desc_ko="부정 가중치", desc_en="Negative weight",
+                  aliases_ko=["부정 가중치","neg weight"], aliases_en=["neg weight","negative weight"])
+        self._reg("ai.pos_weight", 1.0, "float", 0.2, 2.0, desc_ko="긍정 가중치", desc_en="Positive weight",
+                  aliases_ko=["긍정 가중치","pos weight"], aliases_en=["pos weight","positive weight"])
+        self._reg("ai.bias_acceptance", 0.5, "float", 0.05, 0.95, desc_ko="편향 수용도", desc_en="Bias acceptance",
+                  aliases_ko=["편향 수용","바이어스","bias"], aliases_en=["bias acceptance","bias"])
+        self._reg("ai.resistance_factor", 0.0, "float", 0.0, 0.8, desc_ko="저항 계수", desc_en="Resistance",
+                  aliases_ko=["저항","저항 계수","resistance"], aliases_en=["resistance","resistance factor"])
+        self._reg("ai.synthesis_potential", 0.0, "float", 0.0, 0.9, desc_ko="종합 잠재력", desc_en="Synthesis",
+                  aliases_ko=["종합","합성","synthesis"], aliases_en=["synthesis","synthesis potential"])
+        self._reg("ai.decay_rate", 0.1, "float", 0.02, 0.3, desc_ko="감쇠율", desc_en="Decay rate",
+                  aliases_ko=["감쇠율","감쇠","decay"], aliases_en=["decay rate","decay"])
+        self._reg("ai.desired_user_approval", 0.5, "float", 0.2, 0.9, desc_ko="목표 호감도", desc_en="Target approval",
+                  aliases_ko=["목표 호감","호감 목표"], aliases_en=["desired approval","target approval"])
+        self._reg("ai.desired_self_image", 0.8, "float", 0.3, 0.95, desc_ko="목표 자아상", desc_en="Target self-image",
+                  aliases_ko=["목표 자아상","자아 목표"], aliases_en=["desired self-image","target self-image"])
+        # System
+        self._reg("system.model", GROQ_MODEL, "str", desc_ko="AI 모델", desc_en="AI model",
+                  aliases_ko=["모델","AI 모델","LLM 모델"], aliases_en=["model","ai model","llm model"])
+        self._reg("system.auto_speak_min", AUTO_SPEAK_MIN, "int", 1, 60, desc_ko="자동발화 최소(초)", desc_en="Auto-speak min (s)",
+                  aliases_ko=["자동 발화 최소","자동발화 최소"], aliases_en=["auto speak min","auto min"])
+        self._reg("system.auto_speak_max", AUTO_SPEAK_MAX, "int", 2, 120, desc_ko="자동발화 최대(초)", desc_en="Auto-speak max (s)",
+                  aliases_ko=["자동 발화 최대","자동발화 최대"], aliases_en=["auto speak max","auto max"])
+
+    def get(self, key):
+        return self.registry[key]["value"]
+
+    def validate_and_cast(self, key, value):
+        if key not in self.registry:
+            return None, f"Unknown key: {key}"
+        entry = self.registry[key]
+        try:
+            if entry["type"] == "int":
+                value = int(float(value))
+                if entry["min"] is not None: value = max(entry["min"], value)
+                if entry["max"] is not None: value = min(entry["max"], value)
+            elif entry["type"] == "float":
+                value = round(float(value), 4)
+                if entry["min"] is not None: value = max(entry["min"], value)
+                if entry["max"] is not None: value = min(entry["max"], value)
+            elif entry["type"] == "color":
+                value = str(value).strip()
+                if not re.match(r'^#[0-9a-fA-F]{6}$', value):
+                    named = _color_name_to_hex(value)
+                    if named: value = named
+                    else: return None, f"Invalid color: {value} (use #RRGGBB or name)"
+            else:
+                value = str(value).strip()
+            return value, None
+        except (ValueError, TypeError) as e:
+            return None, str(e)
+
+    def set(self, key, value):
+        casted, err = self.validate_and_cast(key, value)
+        if err: raise ValueError(err)
+        old = self.registry[key]["value"]
+        self.registry[key]["value"] = casted
+        return old, casted
+
+    def set_refresh_callback(self, cb):
+        self._refresh_callback = cb
+
+    def refresh(self):
+        if self._refresh_callback: self._refresh_callback()
+
+    def find_key_by_alias(self, text):
+        text_lower = text.lower().strip()
+        if text_lower in self.registry: return text_lower
+        best_key, best_len = None, 0
+        for key, entry in self.registry.items():
+            for alias in entry["aliases_ko"] + entry["aliases_en"]:
+                if alias.lower() in text_lower and len(alias) > best_len:
+                    best_key, best_len = key, len(alias)
+        return best_key
+
+    def describe(self, key):
+        e = self.registry[key]
+        bounds = f" [{e['min']}~{e['max']}]" if e["min"] is not None else ""
+        return f"{e['desc_ko']} / {e['desc_en']}{bounds} = {e['value']}"
+
+
+class RuntimeConfigurator:
+    """Parses user config commands via regex + LLM fallback. Korean + English."""
+
+    TRIGGER_KO = [r'바꿔',r'바꾸',r'수정',r'변경',r'설정',r'으로\s*해',r'로\s*해',
+                  r'로\s*바꿔',r'로\s*변경',r'로\s*수정',r'로\s*설정',r'줄여',r'늘려',
+                  r'키워',r'작게',r'크게']
+    TRIGGER_EN = [r'\bchange\b',r'\bset\b',r'\bmodify\b',r'\bupdate\b',
+                  r'\bmake\b.*\b(bigger|smaller|larger)',r'\bincrease\b',r'\bdecrease\b']
+
+    VALUE_PATTERNS = [
+        r'(.+?)\s*(?:을|를)?\s*(\S+?)(?:\s*으로|\s*로)\s*(?:바꿔|수정|변경|설정|해줘|해)',
+        r'(?:set|change|modify|update)\s+(.+?)\s+(?:to|=)\s+(\S+)',
+        r'(.+?)\s+(#[0-9a-fA-F]{6})\s*$',
+        r'(.+?)\s+([+-]?\d+(?:\.\d+)?)\s*$',
+    ]
+
+    def __init__(self, config_mgr, api_key=None):
+        self.cfg = config_mgr
+        self.api_key = api_key
+
+    def is_config_command(self, text):
+        text_lower = text.lower().strip()
+        if text_lower.startswith(("/config","/설정","/수정")): return True
+        has_prop = False
+        for key, entry in self.cfg.registry.items():
+            for alias in entry["aliases_ko"] + entry["aliases_en"]:
+                if alias.lower() in text_lower:
+                    has_prop = True; break
+            if has_prop: break
+        if not has_prop: return False
+        for p in self.TRIGGER_KO + self.TRIGGER_EN:
+            if re.search(p, text_lower): return True
+        if re.search(r'(?:#[0-9a-fA-F]{6}|\d+(?:\.\d+)?)', text): return True
+        return False
+
+    def is_list_command(self, text):
+        text_lower = text.lower().strip()
+        triggers = ["설정 목록","설정 리스트","설정 보여","뭐 바꿀 수 있",
+                     "수정 가능","변경 가능","설정값","현재 설정",
+                     "/config list","/settings","show settings","list settings",
+                     "what can i change","what can i modify"]
+        return any(t in text_lower for t in triggers)
+
+    def parse_command(self, text):
+        text = text.strip()
+        for prefix in ("/config ","/설정 ","/수정 "):
+            if text.lower().startswith(prefix):
+                text = text[len(prefix):].strip(); break
+        changes = self._parse_regex(text)
+        if changes: return changes
+        if self.api_key:
+            changes = self._parse_llm(text)
+            if changes: return changes
+        return []
+
+    def _parse_regex(self, text):
+        for pattern in self.VALUE_PATTERNS:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                alias_part = match.group(1).strip()
+                value_part = match.group(2).strip()
+                key = self.cfg.find_key_by_alias(alias_part)
+                if key:
+                    if value_part.startswith(('+','-')) and self.cfg.registry[key]["type"] in ("int","float"):
+                        try:
+                            delta = float(value_part)
+                            value_part = str(self.cfg.get(key) + delta)
+                        except ValueError: pass
+                    # Try color name if it's a color property
+                    if self.cfg.registry[key]["type"] == "color" and not value_part.startswith('#'):
+                        hex_val = _color_name_to_hex(value_part)
+                        if hex_val: value_part = hex_val
+                    casted, err = self.cfg.validate_and_cast(key, value_part)
+                    if not err: return [{"key": key, "value": casted}]
+        # Multi-part: split by comma/and
+        parts = re.split(r'[,、]\s*|(?:그리고|and)\s*', text)
+        if len(parts) > 1:
+            changes = []
+            for part in parts:
+                sub = self._parse_regex(part.strip())
+                changes.extend(sub)
+            return changes
+        return []
+
+    def _parse_llm(self, text):
+        prop_list = []
+        for key, entry in self.cfg.registry.items():
+            aliases = ", ".join(entry["aliases_ko"][:2] + entry["aliases_en"][:2])
+            bounds = f" [{entry['min']}~{entry['max']}]" if entry["type"] in ("int","float") and entry["min"] is not None else ""
+            prop_list.append(f'  "{key}" ({entry["type"]}{bounds}): {aliases}')
+        props_str = "\n".join(prop_list)
+        prompt = f"""Parse this config command into JSON.
+
+Properties:
+{props_str}
+
+Command: "{text}"
+
+Output ONLY a JSON array of {{"key":"...","value":"..."}}. No explanation.
+If unclear, output []."""
+        result = call_groq(self.api_key, prompt, max_tokens=200)
+        try:
+            result = result.strip()
+            if result.startswith("```"): result = result.split("\n",1)[1]
+            if result.endswith("```"): result = result.rsplit("```",1)[0]
+            parsed = json.loads(result.strip())
+            if not isinstance(parsed, list): return []
+            changes = []
+            for item in parsed:
+                key, val = item.get("key",""), item.get("value","")
+                if key in self.cfg.registry:
+                    casted, err = self.cfg.validate_and_cast(key, val)
+                    if not err: changes.append({"key": key, "value": casted})
+            return changes
+        except: return []
+
+    def generate_preview(self, changes):
+        lines = []
+        for c in changes:
+            e = self.cfg.registry[c["key"]]
+            lines.append(f"  {e['desc_ko']}: {e['value']} → {c['value']}")
+        return "\n".join(lines)
+
+    def apply_changes(self, changes, bot=None):
+        applied = []
+        for c in changes:
+            key, new_val = c["key"], c["value"]
+            try:
+                old_val, new_val = self.cfg.set(key, new_val)
+                theme_map = {
+                    "theme.bg":"BG","theme.bg_secondary":"BG_SECONDARY",
+                    "theme.bg_chat":"BG_CHAT","theme.accent":"ACCENT",
+                    "theme.accent_light":"ACCENT_LIGHT",
+                    "theme.text":"TEXT","theme.text_dim":"TEXT_DIM",
+                    "theme.user_bubble":"USER_BUBBLE","theme.ai_bubble":"AI_BUBBLE",
+                    "theme.input_bg":"INPUT_BG","theme.input_border":"INPUT_BORDER",
+                    "theme.button":"BUTTON",
+                }
+                if key in theme_map: setattr(Theme, theme_map[key], new_val)
+                global GROQ_MODEL, AUTO_SPEAK_MIN, AUTO_SPEAK_MAX
+                if key == "system.model": GROQ_MODEL = new_val
+                elif key == "system.auto_speak_min": AUTO_SPEAK_MIN = new_val
+                elif key == "system.auto_speak_max": AUTO_SPEAK_MAX = new_val
+                if bot and key.startswith("ai."):
+                    state_map = {
+                        "ai.neg_weight":"neg_weight","ai.pos_weight":"pos_weight",
+                        "ai.bias_acceptance":"bias_acceptance","ai.resistance_factor":"resistance_factor",
+                        "ai.synthesis_potential":"synthesis_potential","ai.decay_rate":"decay_rate",
+                        "ai.desired_user_approval":"desired_user_approval","ai.desired_self_image":"desired_self_image",
+                    }
+                    if key in state_map:
+                        setattr(bot.state, state_map[key], new_val)
+                        bot._save_state()
+                applied.append(f"{self.cfg.registry[key]['desc_ko']}: {old_val} → {new_val}")
+            except (ValueError, KeyError) as e:
+                applied.append(f"{key}: Error — {e}")
+        self.cfg.refresh()
+        return applied
 
 
 # ============================================================
@@ -1035,6 +1384,10 @@ class ChatApp(tk.Tk):
         except: pass
         self.bot = None; self.api_key = ""; self.processing = False
         self.auto_speak_enabled = False; self.auto_speak_timer = None
+        self.pending_changes = None  # For config approve/cancel flow
+        self.cfg = ConfigManager().init()
+        self.cfg.set_refresh_callback(self._refresh_ui)
+        self.configurator = None  # Initialized after API key is set
         self.main_frame = tk.Frame(self, bg=Theme.BG)
         self.main_frame.pack(fill=tk.BOTH, expand=True)
         self._show_api_key_screen()
@@ -1115,6 +1468,7 @@ class ChatApp(tk.Tk):
             self.connect_btn.config(text="Connect", state="normal"); return
         self.api_key = key
         self.bot = SelfReflectiveChatbot(api_key=key)
+        self.configurator = RuntimeConfigurator(self.cfg, api_key=key)
         self._show_chat_screen()
 
     def _show_chat_screen(self):
@@ -1210,6 +1564,9 @@ class ChatApp(tk.Tk):
             chat_width = 380
         bubble_max = max(180, int(chat_width * 0.75))
         spacer_width = max(16, int(chat_width * 0.08))
+        ff = self.cfg.get("font.family")
+        cs = self.cfg.get("font.chat_size")
+        ss = self.cfg.get("font.system_size")
 
         row = tk.Frame(self.chat_inner, bg=Theme.BG_CHAT); row.pack(fill="x", padx=8, pady=3)
         if sender == "user":
@@ -1217,29 +1574,33 @@ class ChatApp(tk.Tk):
             tk.Frame(row, bg=Theme.BG_CHAT, width=25).pack(side="right", fill="y")
             b = tk.Frame(row, bg=Theme.USER_BUBBLE)
             b.pack(side="right", anchor="e")
-            tk.Label(b, text=text, font=("Segoe UI", 10), bg=Theme.USER_BUBBLE, fg="white",
+            tk.Label(b, text=text, font=(ff, cs), bg=Theme.USER_BUBBLE, fg="white",
                      wraplength=bubble_max, justify="left", padx=10, pady=6).pack()
         else:
             tk.Frame(row, bg=Theme.BG_CHAT, width=spacer_width).pack(side="right", fill="y")
             b = tk.Frame(row, bg=Theme.AI_BUBBLE); b.pack(side="left", anchor="w")
             et = EMOTION_TEMPLATES.get(self.bot.state.emotion if self.bot else "neutral",
                                        EMOTION_TEMPLATES["neutral"])
-            lbl = tk.Label(b, text=f"{et['emoji']} AI", font=("Segoe UI",8,"bold"),
+            lbl = tk.Label(b, text=f"{et['emoji']} AI", font=(ff,ss,"bold"),
                     bg=Theme.AI_BUBBLE, fg=et["color"], padx=10, anchor="w")
             lbl.pack(fill="x", pady=(6,0))
-            tk.Label(b, text=text, font=("Segoe UI",10), bg=Theme.AI_BUBBLE, fg=Theme.TEXT,
+            tk.Label(b, text=text, font=(ff,cs), bg=Theme.AI_BUBBLE, fg=Theme.TEXT,
                     wraplength=bubble_max, justify="left", padx=10).pack(pady=(3,6))
         self._scroll()
 
     def _sys_msg(self, text):
+        ff = self.cfg.get("font.family")
+        ss = self.cfg.get("font.system_size")
         row = tk.Frame(self.chat_inner, bg=Theme.BG_CHAT); row.pack(fill="x", padx=8, pady=3)
-        tk.Label(row, text=text, font=("Segoe UI",8,"italic"),
+        tk.Label(row, text=text, font=(ff,ss,"italic"),
                 bg=Theme.BG_CHAT, fg=Theme.TEXT_DIM, anchor="center").pack()
         self._scroll()
 
     def _event_msg(self, text, color=Theme.ACCENT_LIGHT):
+        ff = self.cfg.get("font.family")
+        ss = self.cfg.get("font.system_size")
         row = tk.Frame(self.chat_inner, bg=Theme.BG_CHAT); row.pack(fill="x", padx=8, pady=2)
-        tk.Label(row, text=f"⚡ {text}", font=("Segoe UI",8),
+        tk.Label(row, text=f"⚡ {text}", font=(ff,ss),
                 bg=Theme.BG_CHAT, fg=color, anchor="center").pack()
         self._scroll()
 
@@ -1313,10 +1674,200 @@ class ChatApp(tk.Tk):
         text = self.input_field.get("1.0","end").strip()
         if not text: return
         self.input_field.delete("1.0","end")
+
+        # --- Config command handling ---
+        if self.configurator:
+            # List settings command
+            if self.configurator.is_list_command(text):
+                self._add_msg(text, "user")
+                self._show_settings_list()
+                return
+            # Config modification command
+            if self.configurator.is_config_command(text):
+                self._add_msg(text, "user")
+                self._handle_config_command(text)
+                return
+
+        # --- Normal AI chat ---
         self._add_msg(text, "user")
         self.processing = True
         self.send_btn.config(state="disabled", text="...")
         threading.Thread(target=self._proc_thread, args=(text,), daemon=True).start()
+
+    def _handle_config_command(self, text):
+        """Parse config command and show preview with approve/cancel."""
+        self._sys_msg("⚙ Parsing command / 명령 분석 중...")
+        self.processing = True
+        def parse_thread():
+            changes = self.configurator.parse_command(text)
+            self.after(0, lambda: self._show_config_preview(changes))
+        threading.Thread(target=parse_thread, daemon=True).start()
+
+    def _show_config_preview(self, changes):
+        """Show parsed changes with approve/cancel buttons."""
+        self.processing = False
+        if not changes:
+            self._sys_msg("⚙ No matching settings found / 일치하는 설정을 찾지 못했습니다.")
+            self._sys_msg("Tip: '/설정 목록' or '/config list' to see all options")
+            return
+
+        self.pending_changes = changes
+        preview = self.configurator.generate_preview(changes)
+
+        # Preview frame
+        row = tk.Frame(self.chat_inner, bg=Theme.BG_CHAT)
+        row.pack(fill="x", padx=8, pady=4)
+
+        box = tk.Frame(row, bg="#2a2b4a", highlightbackground=Theme.ACCENT,
+                       highlightthickness=1, padx=12, pady=8)
+        box.pack(fill="x")
+
+        tk.Label(box, text="⚙ 수정 미리보기 / Preview", font=("Segoe UI",9,"bold"),
+                 bg="#2a2b4a", fg=Theme.ACCENT_LIGHT, anchor="w").pack(fill="x")
+        tk.Label(box, text=preview, font=("Consolas",9), bg="#2a2b4a", fg=Theme.TEXT,
+                 anchor="w", justify="left").pack(fill="x", pady=(4,8))
+
+        btn_frame = tk.Frame(box, bg="#2a2b4a")
+        btn_frame.pack(fill="x")
+
+        approve_btn = tk.Button(btn_frame, text="✓ 적용 / Apply", font=("Segoe UI",9,"bold"),
+                                bg=Theme.EMO_CONFIDENCE, fg="white",
+                                activebackground="#00a884", activeforeground="white",
+                                relief="flat", cursor="hand2", padx=12, pady=4,
+                                command=lambda: self._apply_config(box))
+        approve_btn.pack(side="left", padx=(0,8))
+
+        cancel_btn = tk.Button(btn_frame, text="✕ 취소 / Cancel", font=("Segoe UI",9,"bold"),
+                               bg=Theme.EMO_ANGER, fg="white",
+                               activebackground="#c0392b", activeforeground="white",
+                               relief="flat", cursor="hand2", padx=12, pady=4,
+                               command=lambda: self._cancel_config(box))
+        cancel_btn.pack(side="left")
+
+        self._scroll()
+
+    def _apply_config(self, preview_box):
+        """Apply pending config changes."""
+        if not self.pending_changes:
+            return
+        changes = self.pending_changes
+        self.pending_changes = None
+
+        # Disable buttons in preview box
+        for w in preview_box.winfo_children():
+            if isinstance(w, tk.Frame):
+                for btn in w.winfo_children():
+                    if isinstance(btn, tk.Button):
+                        btn.config(state="disabled")
+
+        results = self.configurator.apply_changes(changes, bot=self.bot)
+        for r in results:
+            self._event_msg(f"✓ {r}", Theme.EMO_CONFIDENCE)
+
+        # Handle window resize
+        for c in changes:
+            if c["key"] in ("window.width", "window.height"):
+                w = self.cfg.get("window.width")
+                h = self.cfg.get("window.height")
+                self.geometry(f"{w}x{h}")
+
+        self._scroll()
+
+    def _cancel_config(self, preview_box):
+        """Cancel pending config changes."""
+        self.pending_changes = None
+        for w in preview_box.winfo_children():
+            if isinstance(w, tk.Frame):
+                for btn in w.winfo_children():
+                    if isinstance(btn, tk.Button):
+                        btn.config(state="disabled")
+        self._sys_msg("⚙ Cancelled / 취소됨")
+        self._scroll()
+
+    def _show_settings_list(self):
+        """Show all available settings in chat."""
+        categories = [
+            ("🎨 UI Colors / 색상", "theme."),
+            ("🔤 Fonts / 폰트", "font."),
+            ("📐 Window / 창", "window."),
+            ("🧠 AI Parameters / AI 파라미터", "ai."),
+            ("⚙ System / 시스템", "system."),
+        ]
+        row = tk.Frame(self.chat_inner, bg=Theme.BG_CHAT)
+        row.pack(fill="x", padx=8, pady=4)
+        box = tk.Frame(row, bg="#2a2b4a", highlightbackground=Theme.ACCENT,
+                       highlightthickness=1, padx=12, pady=8)
+        box.pack(fill="x")
+        tk.Label(box, text="⚙ Available Settings / 수정 가능 항목",
+                 font=("Segoe UI",9,"bold"), bg="#2a2b4a", fg=Theme.ACCENT_LIGHT,
+                 anchor="w").pack(fill="x", pady=(0,4))
+
+        for cat_name, prefix in categories:
+            tk.Label(box, text=cat_name, font=("Segoe UI",8,"bold"),
+                     bg="#2a2b4a", fg=Theme.GOAL_COLOR, anchor="w").pack(fill="x", pady=(4,0))
+            for key, entry in self.cfg.registry.items():
+                if key.startswith(prefix):
+                    bounds = f" [{entry['min']}~{entry['max']}]" if entry["min"] is not None else ""
+                    line = f"  {entry['desc_ko']}: {entry['value']}{bounds}"
+                    tk.Label(box, text=line, font=("Consolas",8),
+                             bg="#2a2b4a", fg=Theme.TEXT, anchor="w",
+                             justify="left").pack(fill="x")
+
+        tk.Label(box, text="\nUsage: '폰트 크기 14로 바꿔' / 'set font size to 14'",
+                 font=("Segoe UI",8,"italic"), bg="#2a2b4a", fg=Theme.TEXT_DIM,
+                 anchor="w").pack(fill="x", pady=(4,0))
+        self._scroll()
+
+    def _refresh_ui(self):
+        """Refresh all UI widgets after config change. Only updates key areas."""
+        cfg = self.cfg
+        ff = cfg.get("font.family")
+        mf = cfg.get("font.mono_family")
+
+        try:
+            # Top panel
+            if hasattr(self, 'emo_label'):
+                self.emo_label.config(font=(ff+" Emoji", cfg.get("font.emoji_size")))
+            if hasattr(self, 'emo_text'):
+                self.emo_text.config(font=(ff, cfg.get("font.system_size")))
+            if hasattr(self, 'goal_lbl'):
+                self.goal_lbl.config(font=(mf, max(6, cfg.get("font.system_size")-1)))
+            if hasattr(self, 'info_lbl'):
+                self.info_lbl.config(font=(mf, max(6, cfg.get("font.system_size")-1)))
+            if hasattr(self, 'si_val'):
+                self.si_val.config(font=(mf, max(6, cfg.get("font.system_size")-1), "bold"))
+
+            # Chat canvas
+            if hasattr(self, 'chat_canvas'):
+                self.chat_canvas.config(bg=Theme.BG_CHAT)
+            if hasattr(self, 'chat_inner'):
+                self.chat_inner.config(bg=Theme.BG_CHAT)
+
+            # Input area
+            if hasattr(self, 'input_field'):
+                self.input_field.config(
+                    font=(ff, cfg.get("font.input_size")),
+                    bg=Theme.INPUT_BG, fg=Theme.TEXT,
+                    insertbackground=Theme.TEXT,
+                    highlightbackground=Theme.INPUT_BORDER,
+                    highlightcolor=Theme.ACCENT
+                )
+
+            # Buttons
+            if hasattr(self, 'send_btn'):
+                self.send_btn.config(bg=Theme.BUTTON, activebackground=Theme.BUTTON_HOVER
+                                     if hasattr(Theme, 'BUTTON_HOVER') else Theme.BUTTON)
+            if hasattr(self, 'auto_btn'):
+                clr = Theme.LOCK_ON if self.auto_speak_enabled else Theme.LOCK_OFF
+                self.auto_btn.config(bg=clr)
+
+            # Main background
+            self.configure(bg=Theme.BG)
+            if hasattr(self, 'main_frame'):
+                self.main_frame.config(bg=Theme.BG)
+
+        except tk.TclError:
+            pass  # Widget might be destroyed during refresh
 
     def _proc_thread(self, text):
         try:
